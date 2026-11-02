@@ -32,6 +32,10 @@ class LekhoInputController: IMKInputController {
     /// Absent means on.
     static let showEmojiKey = "LekhoShowEmoji"
 
+    /// UserDefaults bool key: learn word sequences and suggest the next word.
+    /// Absent means on.
+    static let predictNextWordKey = "LekhoPredictNextWord"
+
     /// Resolve the current typing mode, migrating from the legacy bool when the
     /// new key hasn't been written yet. Default (and recommended) is `.phoneticFirst`.
     static func currentTypingMode() -> TypingMode {
@@ -48,6 +52,10 @@ class LekhoInputController: IMKInputController {
 
     static func currentShowEmoji() -> Bool {
         return UserDefaults.standard.object(forKey: showEmojiKey) as? Bool ?? true
+    }
+
+    static func currentPredictNextWord() -> Bool {
+        return UserDefaults.standard.object(forKey: predictNextWordKey) as? Bool ?? true
     }
 
     // MARK: - Session state
@@ -93,6 +101,29 @@ class LekhoInputController: IMKInputController {
     /// The last key typed a digit outside a session, so a "." or ":" belongs to a
     /// number.
     private var afterDigit = false
+
+    /// Next-word suggestions on show in the panel, outside a riti session.
+    private(set) var predictions: [String] = []
+    private var predictionTimeout: DispatchWorkItem?
+    private let predictor = WordPredictor.shared
+
+    /// Predictions get out of the way when they go unused for this long.
+    private static let predictionLifetime: TimeInterval = 8
+    /// Key codes of 1-9 on the number row, for Option+number.
+    private static let numberRowKeyCodes: [UInt16] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+
+    /// The word just committed, which Backspace can reopen for editing.
+    private struct ReopenableWord {
+        let text: String
+        let keys: [LekhoEngine.TypedKey]
+        /// The words it follows.
+        let context: [String]
+        /// A space still stands between it and the cursor.
+        var spaceAfter: Bool
+    }
+    private var reopenable: ReopenableWord?
+    /// Replaces the app's copy of a reopened word with the next marked text.
+    private var markedTextReplacement: NSRange?
 
     private var candidatePanel: CandidatePanel?
     private var lastKnownCursorRect: NSRect = .zero
@@ -326,16 +357,20 @@ class LekhoInputController: IMKInputController {
     /// has a word in flight (normally `deactivateServer` has already committed).
     func sessionTakenOver() {
         afterDigit = false
+        dismissPredictions()
+        defer { reopenable = nil }
         if let client = currentClient() { commitPending(client: client) } else { pending = nil }
         if engine.hasSession, let client = currentClient() {
             commitTopCandidate(client: client)
         } else {
             resetSessionState()
         }
+        predictor.endContext()
     }
 
     /// The typing mode changed; the word being composed is discarded.
     func engineWillRebuild() {
+        nextWordPredictionChanged()
         if let client = currentClient() { commitPending(client: client) } else { pending = nil }
         if engine.hasSession, let client = currentClient() {
             clearMarkedText(client: client)
@@ -343,22 +378,76 @@ class LekhoInputController: IMKInputController {
         resetSessionState()
     }
 
+    /// Prediction was turned off or its history cleared: nothing on show or being
+    /// tracked may carry over.
+    func nextWordPredictionChanged() {
+        dismissPredictions()
+        predictor.endContext()
+        predictor.saveNow()
+    }
+
     deinit {
+        predictionTimeout?.cancel()
         freeSuggestion()
     }
 
     // MARK: - Key handling
 
+    /// Mouse events are only here to notice that the cursor may have moved; they
+    /// always go on to the app.
+    override func recognizedEvents(_ sender: Any!) -> Int {
+        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        return Int(mask.rawValue)
+    }
+
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
-        guard let event = event,
-              event.type == .keyDown,
-              let client = sender as? (any IMKTextInput) else {
+        guard let event = event, let client = sender as? (any IMKTextInput) else {
+            return false
+        }
+        guard event.type == .keyDown else {
+            dismissPredictions()
+            predictor.endContext()
+            reopenable = nil
             return false
         }
 
         lastClient = client
         engine.claim(self)
 
+        if !predictions.isEmpty, handlePredictionKey(event, client: client) {
+            return true
+        }
+
+        if reopenWordIfEditing(event, client: client) {
+            return true
+        }
+
+        let hadSession = engine.hasSession
+        var hadPendingSpace = false
+        if case .space = pending { hadPendingSpace = true }
+
+        let handled = handleKey(event, client: client)
+
+        // The phrase being tracked goes on only while words follow each other;
+        // whatever else the key did (moved the cursor, deleted, typed a digit, …)
+        // ends it. Space passes through to the app after committing a word.
+        let isSpace = event.keyCode == 49
+        if !engine.hasSession {
+            if hadSession {
+                if !handled && !isSpace {
+                    predictor.endContext()
+                    reopenable = nil
+                }
+            } else if event.keyCode == 51 {
+                predictor.retractLastWord()
+            } else if !(hadPendingSpace && isSpace) {
+                predictor.endContext()
+            }
+        }
+        return handled
+    }
+
+    private func handleKey(_ event: NSEvent, client: any IMKTextInput) -> Bool {
         let modifiers = event.modifierFlags
         let keyCode = event.keyCode
         let char = event.characters?.first
@@ -374,6 +463,8 @@ class LekhoInputController: IMKInputController {
                 if engine.hasSession { commitTopCandidate(client: client) }
                 client.insertText("." as NSString, replacementRange: Self.emptyRange)
             }
+            predictor.endContext()
+            reopenable = nil
             return true
         }
 
@@ -489,6 +580,8 @@ class LekhoInputController: IMKInputController {
         if keyCode == 49 {
             if engine.hasSession {
                 commitTopCandidate(client: client)
+                reopenable?.spaceAfter = true
+                showPredictions(client: client)
             }
             return false
         }
@@ -532,6 +625,8 @@ class LekhoInputController: IMKInputController {
                 // A lone mark before a digit starts a number (".5"), as in Avro.
                 engine.finishSession()
                 resetSessionState()
+                predictor.endContext()
+                reopenable = nil
                 client.insertText((typed + digit) as NSString, replacementRange: Self.emptyRange)
                 afterDigit = true
                 return true
@@ -543,6 +638,7 @@ class LekhoInputController: IMKInputController {
                     // Phonetic-only: no numbered candidates. Commit pre-edit, then
                     // type the digit as a Bengali numeral (matches no-session behavior).
                     commitTopCandidate(client: client)
+                    reopenable = nil
                     client.insertText(digit as NSString, replacementRange: Self.emptyRange)
                     afterDigit = true
                     return true
@@ -618,9 +714,160 @@ class LekhoInputController: IMKInputController {
             }
             engine.finishSession()
             resetSessionState()
+            predictor.endContext()
+            reopenable = nil
         }
 
         return true
+    }
+
+    // MARK: - Reopening a committed word
+
+    /// Backspace over the word just committed, or a letter typed right after
+    /// backspacing up to it, goes on editing that word rather than starting a new
+    /// one. Only touches the app's text after finding the word there, so anything
+    /// unexpected (the cursor moved, an app that won't show its text) falls back to
+    /// a plain key. Returns whether the key was used up here.
+    private func reopenWordIfEditing(_ event: NSEvent, client: any IMKTextInput) -> Bool {
+        guard let word = reopenable else { return false }
+        reopenable = nil
+        guard !engine.hasSession else { return false }
+        let modifiers = event.modifierFlags.intersection([.control, .option, .command])
+        guard modifiers.isEmpty else { return false }
+
+        if event.keyCode == 51 {
+            if case .space = pending {
+                dropPending(client: client)
+                keepReopenableAfterBackspace(word)
+                return true
+            }
+            if word.spaceAfter {
+                // The app deletes the space; the handler below sees a plain Backspace.
+                keepReopenableAfterBackspace(word)
+                return false
+            }
+            return reopen(word, keys: Array(word.keys.dropLast()), client: client)
+        }
+        if !word.spaceAfter, pending == nil, event.characters?.first?.isLetter == true,
+           reopen(word, keys: word.keys, client: client) {
+            // The letter itself carries on as a normal key into the reopened word.
+            return false
+        }
+        return false
+    }
+
+    private func keepReopenableAfterBackspace(_ word: ReopenableWord) {
+        var word = word
+        word.spaceAfter = false
+        predictor.retractLastWord()
+        reopenable = word
+    }
+
+    /// Start a session over `word`'s text in the app, as if `keys` had just been
+    /// typed. Returns false, with nothing changed, unless the word is right there.
+    private func reopen(_ word: ReopenableWord, keys: [LekhoEngine.TypedKey], client: any IMKTextInput) -> Bool {
+        let length = word.text.utf16.count
+        let cursor = client.selectedRange()
+        guard cursor.location != NSNotFound, cursor.length == 0, cursor.location >= length else { return false }
+        let range = NSRange(location: cursor.location - length, length: length)
+        // actualRange must be a real pointer: IMK writes through it without checking.
+        var actualRange = NSRange(location: NSNotFound, length: 0)
+        guard client.string(from: range, actualRange: &actualRange) == word.text else { return false }
+
+        predictor.resume(context: word.context)
+        guard !keys.isEmpty else {
+            client.insertText("" as NSString, replacementRange: range)
+            return true
+        }
+        freeSuggestion()
+        for key in keys {
+            freeSuggestion()
+            currentSuggestion = engine.feed(key.char, key: key.key, modifier: key.modifier, selection: 0)
+        }
+        userNavigated = false
+        markedTextReplacement = range
+        refreshCandidates(preserveSelection: false)
+        updateMarkedText(client: client)
+        showCandidates(client: client)
+        return true
+    }
+
+    // MARK: - Next-word predictions
+
+    /// Keys that act on the predictions on show: Tab takes the first, Option+number
+    /// any of them, Escape dismisses them. Any other key dismisses them and carries
+    /// on as usual. Returns whether the key was used up here.
+    private func handlePredictionKey(_ event: NSEvent, client: any IMKTextInput) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        if modifiers.isEmpty {
+            switch event.keyCode {
+            case 48:
+                acceptPrediction(at: 0, client: client)
+                return true
+            case 53:
+                dismissPredictions()
+                return true
+            case 49:
+                // The space after a picked word: the suggestions still apply.
+                if case .space = pending {
+                    commitPending(client: client)
+                    return true
+                }
+            default:
+                break
+            }
+        } else if modifiers == .option, let index = Self.numberRowKeyCodes.firstIndex(of: event.keyCode) {
+            if index < predictions.count { acceptPrediction(at: index, client: client) }
+            return true
+        }
+        dismissPredictions()
+        return false
+    }
+
+    /// Type a predicted word, leaving a space pending as with any pick, and suggest
+    /// what could follow it.
+    private func acceptPrediction(at index: Int, client: any IMKTextInput) {
+        let word = predictions[index]
+        if case .space = pending {
+            replacePending(with: " " + word, client: client)
+        } else {
+            client.insertText(word as NSString, replacementRange: Self.emptyRange)
+        }
+        let context = predictor.currentContext
+        predictor.didCommit(word)
+        if let keys = predictor.keys(for: word) {
+            reopenable = ReopenableWord(text: word, keys: keys, context: context, spaceAfter: false)
+        }
+        showPending(.space, client: client)
+        showPredictions(client: client)
+    }
+
+    /// Put up suggestions for the word after the one just committed, if the history
+    /// has any.
+    private func showPredictions(client: any IMKTextInput) {
+        dismissPredictions()
+        guard engine.predictsNextWord else { return }
+        predictions = predictor.predictions()
+        guard !predictions.isEmpty else { return }
+        candidatePanelForShowing().show(
+            candidates: predictions,
+            auxiliaryText: "Tab ↹ to accept · Esc to dismiss",
+            selectedIndex: 0,
+            cursorRect: getCursorRect(client: client),
+            numberPrefix: "⌥"
+        )
+        let timeout = DispatchWorkItem { [weak self] in self?.dismissPredictions() }
+        predictionTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.predictionLifetime, execute: timeout)
+    }
+
+    private func dismissPredictions() {
+        predictionTimeout?.cancel()
+        predictionTimeout = nil
+        guard !predictions.isEmpty else { return }
+        predictions = []
+        // A word being composed may own the panel now; only ever hide our own list.
+        if !engine.hasSession { hideCandidates() }
     }
 
     // MARK: - Text management
@@ -654,8 +901,9 @@ class LekhoInputController: IMKInputController {
         client.setMarkedText(
             attrStr,
             selectionRange: NSRange(location: preEditText.utf16.count, length: 0),
-            replacementRange: Self.emptyRange
+            replacementRange: markedTextReplacement ?? Self.emptyRange
         )
+        markedTextReplacement = nil
     }
 
     private func commitTopCandidate(client: any IMKTextInput) {
@@ -667,12 +915,18 @@ class LekhoInputController: IMKInputController {
     private func pickCandidate(at index: Int, client: any IMKTextInput) {
         if commitCandidate(at: index, client: client) {
             showPending(.space, client: client)
+            showPredictions(client: client)
         }
     }
 
     /// Mouse click on a row of the candidate panel.
     func candidateClicked(at index: Int) {
-        guard engine.isOwner(self), engine.hasSession, let client = currentClient() else { return }
+        guard engine.isOwner(self), let client = currentClient() else { return }
+        if predictions.indices.contains(index) {
+            acceptPrediction(at: index, client: client)
+            return
+        }
+        guard engine.hasSession else { return }
         pickCandidate(at: index, client: client)
     }
 
@@ -687,6 +941,7 @@ class LekhoInputController: IMKInputController {
             return false
         }
 
+        let keys = engine.typedKeys
         let text: String
         if riti_suggestion_is_lonely(suggestion) {
             // Phonetic-only: every keystroke fills riti's buffer, so the session
@@ -708,8 +963,19 @@ class LekhoInputController: IMKInputController {
         }
 
         client.insertText(text as NSString, replacementRange: Self.emptyRange)
+        noteCommitted(text, keys: keys)
         resetSessionState()
         return !text.isEmpty
+    }
+
+    private func noteCommitted(_ text: String, keys: [LekhoEngine.TypedKey]) {
+        let context = predictor.currentContext
+        if engine.predictsNextWord {
+            predictor.didCommit(text)
+            if text == PhoneticFirstPicks.core(text) { predictor.noteKeys(keys, for: text) }
+        }
+        reopenable = text.isEmpty || keys.isEmpty || Self.containsEmoji(text) ? nil
+            : ReopenableWord(text: text, keys: keys, context: context, spaceAfter: false)
     }
 
     // MARK: - Cursor position for candidate window
@@ -798,19 +1064,22 @@ class LekhoInputController: IMKInputController {
         // Get cursor rect AFTER marked text is set (so markedRange is valid)
         let cursorRect = getCursorRect(client: client)
 
-        if candidatePanel == nil {
-            candidatePanel = CandidatePanel()
-            candidatePanel?.onCandidateSelected = { [weak self] index in
-                self?.candidateClicked(at: index)
-            }
-        }
-
-        candidatePanel?.show(
+        candidatePanelForShowing().show(
             candidates: displayCandidates,
             auxiliaryText: auxiliaryText,
             selectedIndex: selectedIndex,
             cursorRect: cursorRect
         )
+    }
+
+    private func candidatePanelForShowing() -> CandidatePanel {
+        if let panel = candidatePanel { return panel }
+        let panel = CandidatePanel()
+        panel.onCandidateSelected = { [weak self] index in
+            self?.candidateClicked(at: index)
+        }
+        candidatePanel = panel
+        return panel
     }
 
     private func hideCandidates() {
@@ -833,12 +1102,16 @@ class LekhoInputController: IMKInputController {
         // becoming active; clear any leftovers in both engine and controller.
         engine.finishSession()
         resetSessionState()
+        dismissPredictions()
+        predictor.endContext()
+        reopenable = nil
         pending = nil
         afterDigit = false
     }
 
     override func deactivateServer(_ sender: Any!) {
         commitOrReset(sender)
+        predictor.saveNow()
         super.deactivateServer(sender)
     }
 
@@ -851,6 +1124,11 @@ class LekhoInputController: IMKInputController {
 
     private func commitOrReset(_ sender: Any!) {
         afterDigit = false
+        dismissPredictions()
+        defer {
+            predictor.endContext()
+            reopenable = nil
+        }
         let client = (sender as? (any IMKTextInput)) ?? currentClient()
         if let client = client { commitPending(client: client) } else { pending = nil }
         if engine.isOwner(self), engine.hasSession {

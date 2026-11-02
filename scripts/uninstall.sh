@@ -31,7 +31,7 @@ rm -f "/Applications/$APP_NAME.app" 2>/dev/null || true
 if [ -d "$USER_DATA_DIR" ] || [ -f "$PREFS_FILE" ] || [ -d "$SAVED_STATE_DIR" ]; then
     echo ""
     echo "User data found:"
-    [ -d "$USER_DATA_DIR" ]   && echo "  - $USER_DATA_DIR (learned word selections)"
+    [ -d "$USER_DATA_DIR" ]   && echo "  - $USER_DATA_DIR (learned word selections, next-word history)"
     [ -f "$PREFS_FILE" ]      && echo "  - $PREFS_FILE (settings)"
     [ -d "$SAVED_STATE_DIR" ] && echo "  - $SAVED_STATE_DIR (welcome window state)"
     echo ""

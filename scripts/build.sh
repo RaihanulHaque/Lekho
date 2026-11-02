@@ -100,6 +100,7 @@ SWIFT_SOURCES=(
     "$SWIFT_DIR/Sources/Engine.swift"
     "$SWIFT_DIR/Sources/InputController.swift"
     "$SWIFT_DIR/Sources/WelcomeWindow.swift"
+    "$SWIFT_DIR/Sources/WordPredictor.swift"
     "$SWIFT_DIR/Sources/main.swift"
 )
 

@@ -7,12 +7,20 @@ import InputMethodKit
 final class MockClient: NSObject, IMKTextInput {
     var committed = ""
     var marked = ""
+    /// Whether the app lets an input method read its text; not all do.
+    var readable = true
 
     func insertText(_ string: Any!, replacementRange: NSRange) {
+        if replacementRange.location != NSNotFound {
+            committed = (committed as NSString).replacingCharacters(in: replacementRange, with: "")
+        }
         committed += (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         marked = ""
     }
     func setMarkedText(_ string: Any!, selectionRange: NSRange, replacementRange: NSRange) {
+        if replacementRange.location != NSNotFound {
+            committed = (committed as NSString).replacingCharacters(in: replacementRange, with: "")
+        }
         marked = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
     }
     func selectedRange() -> NSRange { NSRange(location: committed.utf16.count, length: 0) }
@@ -36,7 +44,11 @@ final class MockClient: NSObject, IMKTextInput {
     func windowLevel() -> CGWindowLevel { 0 }
     func supportsProperty(_ property: TSMDocumentPropertyTag) -> Bool { false }
     func uniqueClientIdentifierString() -> String! { "test" }
-    func string(from range: NSRange, actualRange: NSRangePointer!) -> String! { "" }
+    func string(from range: NSRange, actualRange: NSRangePointer!) -> String! {
+        // The real client writes through this pointer unconditionally; nil crashes it.
+        actualRange.pointee = range
+        return readable ? (committed as NSString).substring(with: range) : nil
+    }
     func firstRect(forCharacterRange aRange: NSRange, actualRange: NSRangePointer!) -> NSRect {
         NSRect(x: 40, y: 40, width: 1, height: 18)
     }
@@ -66,6 +78,7 @@ struct Rig {
                                   charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!
         let handled = controller.handle(ev, client: client)
         if code == SPACE && !handled { client.committed += " " }  // space passes through to the app
+        if code == BKSP && !handled && !client.committed.isEmpty { client.committed.removeLast() }  // so does backspace
         return handled
     }
     func type(_ text: String) {
@@ -245,6 +258,198 @@ print("== live mode switch mid-word drops the word")
 a.type("sonar"); setMode("smart")
 checkTrue("dropped", a.client.marked.isEmpty && a.take().isEmpty)
 a.type("sonar "); check("new mode active", a.take(), "সোনার ")
+
+print("== next-word prediction learns from typing history")
+setMode("phoneticFirst")
+let c = Rig()
+// An earlier test left a remembered pick for this word; back to its literal spelling.
+c.type("ami"); c.key(0, chars: "1"); c.key(ESC); _ = c.take()
+WordPredictor.shared.clearHistory()
+let OPT2: UInt16 = 19
+func click(_ rig: Rig) {
+    let ev = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    checkTrue("click goes on to the app", !rig.controller.handle(ev, client: rig.client))
+}
+func newLine(_ rig: Rig) { rig.key(RET); _ = rig.take() }
+
+c.type("ami "); checkTrue("nothing predicted before any history", c.controller.predictions.isEmpty)
+newLine(c)
+c.type("ami bhat khai "); newLine(c)
+c.type("ami ")
+check("seen once → predicted", c.controller.predictions.joined(separator: ","), "ভাত")
+_ = c.take()
+let tabUsed = c.key(TAB, chars: "\t")
+checkTrue("Tab is used up", tabUsed)
+check("Tab types the word", c.take(), "ভাত")
+check("…with a space pending", c.client.marked, " ")
+check("next word chained", c.controller.predictions.joined(separator: ","), "খাই")
+c.key(TAB, chars: "\t")
+check("chained word gets the pending space", c.take(), " খাই")
+newLine(c); c.key(ESC); _ = c.take()
+
+print("== predictions: ranking")
+for _ in 0..<2 { c.type("ami tumi "); newLine(c) }
+c.type("ami ")
+check("most frequent first", c.controller.predictions.first ?? "", "তুমি")
+checkTrue("alternatives follow", c.controller.predictions.contains("ভাত"), "\(c.controller.predictions)")
+_ = c.take()
+let second = c.controller.predictions[1]
+c.key(OPT2, chars: "\u{2122}", flags: .option)
+check("Option+2 takes the second", c.take(), second)
+newLine(c); c.key(ESC); _ = c.take()
+// The two-word context outranks the one-word one, even with fewer sightings.
+c.type("ke ami khela "); newLine(c)
+c.type("ke ami ")
+check("two-word context wins", c.controller.predictions.first ?? "", "খেলা")
+_ = c.take(); newLine(c)
+c.type("ami "); check("one-word context unaffected", c.controller.predictions.first ?? "", "ভাত")
+
+print("== predictions: other keys behave as before")
+c.key(ESC); checkTrue("Escape dismisses", c.controller.predictions.isEmpty); _ = c.take()
+c.type("ami "); c.key(TAB, chars: "\t"); _ = c.take(); newLine(c); c.key(ESC); _ = c.take()
+c.type("ami "); _ = c.take()
+c.type("ki "); check("typing goes on as usual", c.take(), "কি ")
+newLine(c)
+c.type("ami "); _ = c.take(); c.key(0, chars: "5")
+check("digit is still a digit", c.take(), "৫")
+checkTrue("digit dismisses", c.controller.predictions.isEmpty)
+c.type("ami ");  _ = c.take(); let passed = !c.key(TAB, chars: "\u{19}", flags: .shift)
+checkTrue("Shift+Tab reaches the app", passed)
+c.type("ami");   c.key(RET); check("list pick: word", c.take(), "আমি")
+checkTrue("list pick predicts too", !c.controller.predictions.isEmpty)
+c.key(SPACE, chars: " "); check("space after a pick", c.take(), " ")
+checkTrue("…keeps the predictions", !c.controller.predictions.isEmpty)
+newLine(c)
+
+print("== predictions: what isn't learned")
+c.type("kothay ");  c.key(BKSP); c.type("gelo "); newLine(c); _ = c.take()
+c.type("kothay "); checkTrue("backspaced word start doesn't link", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c)
+c.type("shuru bhul"); c.type(" "); c.key(BKSP); c.key(BKSP); c.type("thik "); newLine(c)
+c.type("shuru "); checkTrue("retracted typo isn't predicted", !c.controller.predictions.contains("ভুল"), "\(c.controller.predictions)")
+newLine(c)
+c.type("shesh. porer "); newLine(c)
+c.type("shesh "); checkTrue("nothing across a sentence end", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c)
+c.type("dam 25 taka "); newLine(c)
+c.type("dam "); checkTrue("no link across a number", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c)
+c.type("kobe "); c.key(DOWN, chars: "\u{F701}"); c.type("jabo "); newLine(c)
+c.type("kobe "); checkTrue("no link across an arrow key", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c)
+c.type("kotha "); click(c); checkTrue("click dismisses", c.controller.predictions.isEmpty)
+c.type("onno "); newLine(c)
+c.type("kotha "); checkTrue("no link across a click", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c)
+c.type("chai "); c.controller.commitComposition(c.client); c.type("na "); newLine(c)
+c.type("chai "); checkTrue("no link across commitComposition", c.controller.predictions.isEmpty, "\(c.controller.predictions)")
+newLine(c); _ = c.take()
+
+print("== predictions: persisted, private, resilient")
+WordPredictor.shared.saveNow(); WordPredictor.shared.waitForDisk()
+let historyPath = userDir + "/next-word-history.json"
+let historyURL = URL(fileURLWithPath: historyPath)
+let perms = (try? FileManager.default.attributesOfItem(atPath: historyPath)[.posixPermissions]) as? Int
+checkTrue("only the user can read it", perms == 0o600, "\(String(describing: perms))")
+let reloaded = WordPredictor(fileURL: historyURL)
+reloaded.didCommit("আমি")
+checkTrue("survives a restart", reloaded.predictions().contains("তুমি"), "\(reloaded.predictions())")
+let junkURL = URL(fileURLWithPath: userDir + "/junk.json")
+try! "not json".write(to: junkURL, atomically: true, encoding: .utf8)
+let fromJunk = WordPredictor(fileURL: junkURL)
+fromJunk.didCommit("আমি")
+checkTrue("corrupt file starts empty", fromJunk.predictions().isEmpty)
+checkTrue("corrupt file moved aside", !FileManager.default.fileExists(atPath: junkURL.path))
+
+print("== predictions: settings")
+UserDefaults.standard.set(false, forKey: LekhoInputController.predictNextWordKey)
+NotificationCenter.default.post(name: .lekhoNextWordSettingChanged, object: nil)
+c.type("ami "); checkTrue("off: nothing predicted", c.controller.predictions.isEmpty); _ = c.take()
+let tabOff = !c.key(TAB, chars: "\t"); checkTrue("off: Tab reaches the app", tabOff); newLine(c)
+UserDefaults.standard.set(true, forKey: LekhoInputController.predictNextWordKey)
+NotificationCenter.default.post(name: .lekhoNextWordSettingChanged, object: nil)
+c.type("ami "); checkTrue("back on: history kept", !c.controller.predictions.isEmpty); _ = c.take()
+setMode("phoneticOnly")
+checkTrue("mode switch dismisses", c.controller.predictions.isEmpty)
+c.type("ami "); checkTrue("phonetic-only: never", c.controller.predictions.isEmpty); _ = c.take(); newLine(c)
+setMode("phoneticFirst")
+c.type("ami "); _ = c.take()
+NotificationCenter.default.post(name: .lekhoNextWordHistoryCleared, object: nil)
+checkTrue("clear dismisses", c.controller.predictions.isEmpty)
+WordPredictor.shared.waitForDisk()
+checkTrue("clear removes the file", !FileManager.default.fileExists(atPath: historyPath))
+newLine(c)
+c.type("ami "); checkTrue("clear forgets", c.controller.predictions.isEmpty); newLine(c); _ = c.take()
+
+print("== backspace reopens the word just typed")
+WordPredictor.shared.clearHistory()
+c.type("ami"); c.key(BKSP); c.type("i"); check("mid-word retype", c.client.marked, "আমি"); c.key(ESC); _ = c.take()
+c.type("ami "); c.key(BKSP); check("first backspace takes the space", c.client.committed, "আমি")
+c.key(BKSP)
+check("second reopens the word", c.client.marked, "আম")
+check("…out of the app's text", c.client.committed, "")
+c.type("i"); check("retyping gives the same word", c.client.marked, "আমি")
+checkTrue("suggestions are back", c.candidates.contains("আমি"), "\(c.candidates.prefix(3))")
+c.type(" "); check("commits once", c.take(), "আমি ")
+newLine(c)
+c.type("ami"); c.key(RET); c.key(BKSP); c.key(BKSP)
+check("after a list pick", c.client.marked, "আম"); c.type("i "); check("…same word", c.take(), "আমি "); newLine(c)
+c.type("ami "); c.key(BKSP); c.type("r"); check("typing on continues the word", c.client.marked, "আমির")
+c.type(" "); check("…as one word", c.take(), "আমির "); newLine(c)
+c.type("ami. "); c.key(BKSP); c.key(BKSP); check("reopens past punctuation", c.client.marked, "আমি"); c.key(ESC); _ = c.take()
+c.type("t "); c.key(BKSP); c.key(BKSP)
+check("one letter word: gone", c.client.committed + c.client.marked, ""); c.type("ki "); check("next word clean", c.take(), "কি "); newLine(c)
+// Nothing but the word we typed may be replaced.
+c.type("ami "); c.client.committed = "abc "; c.key(BKSP); c.key(BKSP)
+check("changed text isn't touched", c.client.marked, ""); check("…plain backspace", c.take(), "ab"); newLine(c)
+c.client.readable = false
+c.type("ami "); c.key(BKSP); c.key(BKSP); check("unreadable app: plain backspace", c.client.marked, ""); _ = c.take()
+c.client.readable = true; newLine(c)
+c.type("ami "); click(c); c.key(BKSP); c.key(BKSP); check("not after a click", c.client.marked, ""); _ = c.take(); newLine(c)
+c.type("ami "); c.key(DOWN, chars: "\u{F701}"); c.key(BKSP); check("not after an arrow", c.client.marked, ""); _ = c.take(); newLine(c)
+print("== reopening keeps the phrase")
+c.type("ami bhul "); c.key(BKSP); c.key(BKSP); c.type("l "); newLine(c)
+c.type("ami "); check("edited word still follows the one before", c.controller.predictions.joined(separator: ","), "ভুল"); _ = c.take()
+newLine(c); c.type("ami bhul ")
+c.key(BKSP); c.key(BKSP); c.key(BKSP); c.key(BKSP); c.key(BKSP); c.type("bhat "); newLine(c)
+c.type("ami "); checkTrue("replaced word is learned", c.controller.predictions.contains("ভাত"), "\(c.controller.predictions)"); _ = c.take(); newLine(c)
+c.type("ami "); c.key(TAB, chars: "\t"); c.key(BKSP); c.key(BKSP)
+check("an accepted suggestion reopens too", c.client.marked, "ভা")
+c.key(ESC); _ = c.take(); newLine(c)
+
+print("== removing and retyping a letter of আমার")
+WordPredictor.shared.clearHistory()
+c.type("amar boi "); newLine(c)
+c.type("amar"); let fresh = c.candidates; let freshMark = c.client.marked
+c.key(BKSP); check("mid-word: letter gone", c.client.marked, "আমা")
+c.type("r"); check("mid-word: same word", c.client.marked, freshMark)
+check("mid-word: same list", c.candidates.joined(separator: ","), fresh.joined(separator: ","))
+c.type(" "); check("mid-word: commits", c.client.committed, "আমার ")
+check("mid-word: next word still predicted", c.controller.predictions.joined(separator: ","), "বই")
+_ = c.take(); newLine(c)
+c.type("amar "); c.key(BKSP); c.key(BKSP); check("committed: reopened", c.client.marked, "আমা")
+c.type("r"); check("committed: same word", c.client.marked, freshMark)
+check("committed: same list", c.candidates.joined(separator: ","), fresh.joined(separator: ","))
+c.type(" "); check("committed: commits", c.client.committed, "আমার ")
+check("committed: next word still predicted", c.controller.predictions.joined(separator: ","), "বই")
+_ = c.take(); newLine(c)
+c.type("amar "); check("still remembered afterwards", c.controller.predictions.joined(separator: ","), "বই")
+_ = c.take(); newLine(c)
+c.type("amar boi "); c.key(BKSP); c.key(BKSP); c.type("i ");
+check("second word edited", c.client.committed, "আমার বই "); _ = c.take(); newLine(c)
+c.type("amar "); check("link survives editing the next word", c.controller.predictions.joined(separator: ","), "বই")
+_ = c.take(); newLine(c)
+
+print("== remove a letter, Space, Backspace, retype it")
+c.type("amar"); c.key(BKSP); c.type(" "); check("word without the letter", c.client.committed, "আমা ")
+c.key(BKSP); check("space gone", c.client.committed, "আমা")
+c.type("r"); check("typing on continues the word", c.client.marked, "আমার"); check("…out of the text", c.client.committed, "")
+checkTrue("…with its suggestions", c.candidates.contains("আমার"), "\(c.candidates.prefix(3))")
+c.type(" "); check("…commits as one word", c.take(), "আমার "); newLine(c)
+c.type("amar "); c.key(BKSP); c.key(BKSP); c.type(" "); check("reopened, shortened, committed", c.client.committed, "আমা ")
+c.key(BKSP); c.type("r"); check("…continues too", c.client.marked, "আমার")
+c.type(" "); check("…as one word", c.take(), "আমার "); newLine(c)
 
 UserDefaults.standard.removePersistentDomain(forName: ProcessInfo.processInfo.processName)
 print(failures == 0 ? "\nALL PASSED" : "\n\(failures) FAILED")

@@ -13,19 +13,28 @@ import Foundation
 /// The controller currently composing is the `owner`. Another controller taking
 /// over (`claim`) first lets the old owner commit, then ends any stale session.
 final class LekhoEngine {
+    struct TypedKey {
+        let char: Character
+        let key: UInt16
+        let modifier: UInt8
+    }
+
     static let shared = LekhoEngine()
 
     private(set) var typingMode: LekhoInputController.TypingMode = .phoneticFirst
     private(set) var showEmoji = true
+    /// Learn and suggest next words. Phonetic-only mode has no popup, so never there.
+    private(set) var predictsNextWord = true
     private(set) weak var owner: LekhoInputController?
 
     /// Raw phonetic transliteration of the current buffer, from the shadow
     /// context. Only populated in `.phoneticFirst`.
     private(set) var currentPhonetic: String?
 
-    /// What has been typed into riti's buffer this session (riti only exposes it
-    /// for a full suggestion list, never for a lonely one).
-    private(set) var typedText = ""
+    /// The keys fed to riti's buffer this session (riti only exposes the text for a
+    /// full suggestion list, never for a lonely one).
+    private(set) var typedKeys: [TypedKey] = []
+    var typedText: String { String(typedKeys.map { $0.char }) }
 
     private var mainCtx: OpaquePointer?
     private var mainConfig: OpaquePointer?
@@ -41,6 +50,10 @@ final class LekhoEngine {
                            name: .lekhoTypingModeChanged, object: nil)
         center.addObserver(self, selector: #selector(emojiSettingChanged),
                            name: .lekhoEmojiSettingChanged, object: nil)
+        center.addObserver(self, selector: #selector(nextWordSettingChanged),
+                           name: .lekhoNextWordSettingChanged, object: nil)
+        center.addObserver(self, selector: #selector(nextWordHistoryCleared),
+                           name: .lekhoNextWordHistoryCleared, object: nil)
     }
 
     // MARK: Ownership
@@ -71,7 +84,7 @@ final class LekhoEngine {
     /// preserves it when the key is a punctuation mark).
     func feed(_ char: Character, key: UInt16, modifier: UInt8, selection: UInt8) -> OpaquePointer? {
         let suggestion = riti_get_suggestion_for_key(mainCtx, key, modifier, selection)
-        typedText.append(char)
+        typedKeys.append(TypedKey(char: char, key: key, modifier: modifier))
         if let ctx = phoneticCtx {
             let shadow = riti_get_suggestion_for_key(ctx, key, modifier, 0)
             currentPhonetic = Self.lonelyText(of: shadow)
@@ -85,7 +98,7 @@ final class LekhoEngine {
     /// Returns an owned Suggestion the caller must free.
     func backspace(wholeWord: Bool) -> OpaquePointer? {
         let suggestion = riti_context_backspace_event(mainCtx, wholeWord)
-        if wholeWord { typedText = "" } else if !typedText.isEmpty { typedText.removeLast() }
+        if wholeWord { typedKeys = [] } else if !typedKeys.isEmpty { typedKeys.removeLast() }
         if let ctx = phoneticCtx {
             let shadow = riti_context_backspace_event(ctx, wholeWord)
             currentPhonetic = Self.lonelyText(of: shadow)
@@ -115,7 +128,7 @@ final class LekhoEngine {
             riti_context_finish_input_session(ctx)
         }
         currentPhonetic = nil
-        typedText = ""
+        typedKeys = []
     }
 
     /// The shadow must never outlive the main session.
@@ -125,7 +138,7 @@ final class LekhoEngine {
             riti_context_finish_input_session(ctx)
         }
         currentPhonetic = nil
-        typedText = ""
+        typedKeys = []
     }
 
     private static func lonelyText(of suggestion: OpaquePointer?) -> String? {
@@ -145,6 +158,7 @@ final class LekhoEngine {
     private func build() {
         typingMode = LekhoInputController.currentTypingMode()
         showEmoji = LekhoInputController.currentShowEmoji()
+        updatePredictsNextWord()
 
         let userDir = Self.userDataDir()
         // riti unwraps the JSON parse of these files; a corrupt one would abort
@@ -228,6 +242,20 @@ final class LekhoEngine {
     @objc private func emojiSettingChanged() {
         showEmoji = LekhoInputController.currentShowEmoji()
     }
+
+    @objc private func nextWordSettingChanged() {
+        owner?.nextWordPredictionChanged()
+        updatePredictsNextWord()
+    }
+
+    @objc private func nextWordHistoryCleared() {
+        owner?.nextWordPredictionChanged()
+        WordPredictor.shared.clearHistory()
+    }
+
+    private func updatePredictsNextWord() {
+        predictsNextWord = typingMode != .phoneticOnly && LekhoInputController.currentPredictNextWord()
+    }
 }
 
 // MARK: - Phonetic-first pick memory
@@ -299,4 +327,6 @@ final class PhoneticFirstPicks {
 extension Notification.Name {
     static let lekhoTypingModeChanged = Notification.Name("LekhoTypingModeChanged")
     static let lekhoEmojiSettingChanged = Notification.Name("LekhoEmojiSettingChanged")
+    static let lekhoNextWordSettingChanged = Notification.Name("LekhoNextWordSettingChanged")
+    static let lekhoNextWordHistoryCleared = Notification.Name("LekhoNextWordHistoryCleared")
 }

@@ -316,6 +316,8 @@ class SettingsView: NSView {
     private var cards: [ModeCard] = []
     private let emojiSwitch = NSSwitch()
     private let emojiTitle = NSTextField(labelWithString: "Show emoji in suggestions")
+    private let nextWordSwitch = NSSwitch()
+    private let nextWordTitle = NSTextField(labelWithString: "Predict the next word")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -361,14 +363,16 @@ class SettingsView: NSView {
 
         let suggestionsHeader = WelcomeUI.sectionHeader("Suggestions")
         let emojiCard = makeEmojiCard()
+        let nextWordCard = makeNextWordCard()
 
-        let content = NSStackView(views: [header, intro, cardStack, suggestionsHeader, emojiCard])
+        let content = NSStackView(views: [header, intro, cardStack, suggestionsHeader, emojiCard, nextWordCard])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 6
         content.setCustomSpacing(18, after: intro)
         content.setCustomSpacing(26, after: cardStack)
         content.setCustomSpacing(10, after: suggestionsHeader)
+        content.setCustomSpacing(10, after: emojiCard)
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
 
@@ -386,6 +390,7 @@ class SettingsView: NSView {
             cardStack.widthAnchor.constraint(equalTo: content.widthAnchor),
             intro.widthAnchor.constraint(equalTo: content.widthAnchor),
             emojiCard.widthAnchor.constraint(equalTo: content.widthAnchor),
+            nextWordCard.widthAnchor.constraint(equalTo: content.widthAnchor),
 
             tip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: WelcomeUI.pageInset),
             tip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -WelcomeUI.pageInset),
@@ -425,11 +430,63 @@ class SettingsView: NSView {
             insets: NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16))
     }
 
-    /// The toggle has nothing to act on in Phonetic-only mode (no suggestion list).
+    /// "Predict the next word" row: title + description on the left, Clear History
+    /// and the switch on the right.
+    private func makeNextWordCard() -> NSView {
+        nextWordTitle.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+
+        let desc = NSTextField(wrappingLabelWithString:
+            "After each word, Lekho suggests what you usually type next. Press Tab to accept, or Option+number for another. Your typing history stays on this Mac.")
+        desc.font = NSFont.systemFont(ofSize: 13)
+        desc.textColor = .secondaryLabelColor
+
+        let text = NSStackView(views: [nextWordTitle, desc])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 4
+
+        let clear = NSButton(title: "Clear History", target: self, action: #selector(clearNextWordHistory))
+        clear.setContentHuggingPriority(.required, for: .horizontal)
+        clear.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        nextWordSwitch.state = LekhoInputController.currentPredictNextWord() ? .on : .off
+        nextWordSwitch.target = self
+        nextWordSwitch.action = #selector(nextWordToggled)
+        nextWordSwitch.setContentHuggingPriority(.required, for: .horizontal)
+        nextWordSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [text, clear, nextWordSwitch])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 16
+
+        return CardContainer(
+            content: row,
+            insets: NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16))
+    }
+
+    /// These toggles have nothing to act on in Phonetic-only mode (no suggestion list).
     private func updateEmojiAvailability(for mode: LekhoInputController.TypingMode) {
         let available = mode != .phoneticOnly
         emojiSwitch.isEnabled = available
         emojiTitle.textColor = available ? .labelColor : .tertiaryLabelColor
+        nextWordSwitch.isEnabled = available
+        nextWordTitle.textColor = available ? .labelColor : .tertiaryLabelColor
+    }
+
+    @objc private func nextWordToggled() {
+        UserDefaults.standard.set(nextWordSwitch.state == .on, forKey: LekhoInputController.predictNextWordKey)
+        NotificationCenter.default.post(name: .lekhoNextWordSettingChanged, object: nil)
+    }
+
+    @objc private func clearNextWordHistory() {
+        let alert = NSAlert()
+        alert.messageText = "Clear your next-word history?"
+        alert.informativeText = "Lekho will forget the word sequences it has learned. This can't be undone."
+        alert.addButton(withTitle: "Clear History")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        NotificationCenter.default.post(name: .lekhoNextWordHistoryCleared, object: nil)
     }
 
     @objc private func emojiToggled() {

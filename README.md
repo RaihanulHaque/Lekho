@@ -36,6 +36,7 @@ Lekho is built natively for Apple Silicon — no Rosetta required, future-proof 
 - **Avro Phonetic typing** — type `ami banglay gan gai` → আমি বাংলায় গান গাই
 - **150k word dictionary** with smart suggestions and autocorrect
 - **Smart emoji suggestions** — type কান্না and get 😢, বাংলাদেশ and get 🇧🇩, right in the candidate panel
+- **Next-word prediction** — Lekho learns the word sequences you type and suggests what comes next. Press Tab to accept. Your history never leaves your Mac.
 - **Three typing modes** — *Phonetic-first* (default: your exact spelling by default with the suggestion list still one keypress away), *Smart* (suggestions, autocorrect, and emoji pick the word for you), or *Phonetic-only* (pure character-by-character control, no popup). Switch anytime in Settings.
 - **Your font, your size** — draw the suggestion popup in any installed Bangla font (July, Ekush, Noto Sans Bengali, …) at the size you like. Nothing bundled, so the app stays tiny.
 - **Native Apple Silicon** — ~2.2 MB, instant startup, zero CPU when idle
@@ -89,6 +90,19 @@ Open the **Settings** tab in the Lekho window to pick how typing behaves:
 Prefer suggestions without emoji? Turn off **Show emoji in suggestions** in the same tab.
 
 Changes apply immediately — no restart needed.
+
+## Next-word prediction
+
+After you type a word, Lekho suggests the words you've typed after it before. The more often you've typed a sequence, the higher it ranks, and suggestions that match your last two words come first. Nothing is suggested until you've typed a sequence at least once.
+
+| Key | What it does |
+| --- | --- |
+| **Tab** | Type the first suggestion |
+| **Option+1…9** | Type that suggestion |
+| **Esc** | Dismiss the suggestions |
+| Anything else | Dismiss the suggestions and type as usual |
+
+Only Bangla words are learned, never numbers, English, or emoji, and a phrase ends at punctuation or when you move the cursor. The history is a local file, `~/Library/Application Support/Lekho/next-word-history.json`, readable only by your user account. To turn prediction off or erase the history, use **Predict the next word** in Settings. Phonetic-only mode doesn't use it.
 
 ## Fonts
 

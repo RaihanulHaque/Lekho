@@ -7,14 +7,16 @@ class CandidatePanel {
     /// Called when user clicks a candidate. Parameter is the candidate index.
     var onCandidateSelected: ((Int) -> Void)?
 
-    func show(candidates: [String], auxiliaryText: String, selectedIndex: Int, cursorRect: NSRect) {
+    func show(candidates: [String], auxiliaryText: String, selectedIndex: Int, cursorRect: NSRect,
+              numberPrefix: String = "") {
         if panel == nil {
             createPanel()
         }
 
         guard let panel = panel, let contentView = contentView else { return }
 
-        contentView.update(candidates: candidates, auxiliaryText: auxiliaryText, selectedIndex: selectedIndex)
+        contentView.update(candidates: candidates, auxiliaryText: auxiliaryText, selectedIndex: selectedIndex,
+                           numberPrefix: numberPrefix)
 
         // Size the panel to fit content
         let size = contentView.idealSize()
@@ -93,6 +95,8 @@ class CandidateView: NSView {
     private var auxiliaryText: String = ""
     private var selectedIndex: Int = 0
     private var scrollOffset: Int = 0
+    /// Drawn before each row number: the modifier that picks the row, if any.
+    private var numberPrefix: String = ""
 
     /// Called when user clicks a candidate row. Parameter is the candidate index.
     var onCandidateClicked: ((Int) -> Void)?
@@ -106,7 +110,8 @@ class CandidateView: NSView {
     private var rowHeight: CGFloat { ceil(candidateFont.pointSize * 1.5) }
     private var panelWidth: CGFloat { max(280, 280 + (candidateFont.pointSize - 16) * 10) }
 
-    func update(candidates: [String], auxiliaryText: String, selectedIndex: Int) {
+    func update(candidates: [String], auxiliaryText: String, selectedIndex: Int, numberPrefix: String = "") {
+        self.numberPrefix = numberPrefix
         self.candidates = candidates
         self.auxiliaryText = auxiliaryText
         self.selectedIndex = candidates.isEmpty ? 0 : min(selectedIndex, candidates.count - 1)
@@ -204,7 +209,7 @@ class CandidateView: NSView {
                     ? NSColor.alternateSelectedControlTextColor
                     : NSColor.tertiaryLabelColor
             ]
-            "\(candidateIndex + 1)".draw(in: numRect, withAttributes: numAttrs)
+            "\(numberPrefix)\(candidateIndex + 1)".draw(in: numRect, withAttributes: numAttrs)
 
             // Candidate text
             let textRect = NSRect(
