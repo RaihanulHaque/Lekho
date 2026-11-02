@@ -150,6 +150,9 @@ class LekhoInputController: IMKInputController {
 
     private static let emptyRange = NSRange(location: NSNotFound, length: NSNotFound)
 
+    /// `displayOrder` value of a row that comes from typing history, not from riti.
+    private static let historyRow = UInt.max
+
     // MARK: - Candidate helpers
 
     static func containsEmoji(_ text: String) -> Bool {
@@ -187,7 +190,28 @@ class LekhoInputController: IMKInputController {
 
     /// riti index of the current selection (0 when there is no list).
     private var selectedRitiIndex: UInt {
-        return displayOrder.indices.contains(selectedIndex) ? displayOrder[selectedIndex] : 0
+        guard displayOrder.indices.contains(selectedIndex),
+              displayOrder[selectedIndex] != Self.historyRow else { return 0 }
+        return displayOrder[selectedIndex]
+    }
+
+    /// Words that usually come next and fit what's being typed go right below the
+    /// first row. The default selection is worked out by its word afterwards, so
+    /// this never changes what Space commits.
+    private func addHistoryRows(to items: inout [(index: UInt, text: String)]) {
+        let typed = engine.typedText
+        guard engine.predictsNextWord, !items.isEmpty, !typed.isEmpty,
+              typed == PhoneticFirstPicks.core(typed) else { return }
+        var rows: [(index: UInt, text: String)] = []
+        for completion in predictor.completions(forTyped: typed) where rows.count < WordPredictor.maxPredictions {
+            if PhoneticFirstPicks.core(items[0].text) == completion.word { continue }
+            if let pos = items.firstIndex(where: { PhoneticFirstPicks.core($0.text) == completion.word }) {
+                rows.append(items.remove(at: pos))
+            } else if completion.matchesTyped {
+                rows.append((Self.historyRow, completion.word))
+            }
+        }
+        items.insert(contentsOf: rows, at: 1)
     }
 
     /// Rebuild the display list from `currentSuggestion` and pick the default
@@ -230,6 +254,8 @@ class LekhoInputController: IMKInputController {
                 phoneticCandidate = item.text
             }
         }
+
+        addHistoryRows(to: &items)
 
         displayCandidates = items.map { $0.text }
         displayOrder = items.map { $0.index }
@@ -878,18 +904,24 @@ class LekhoInputController: IMKInputController {
             return
         }
 
-        // get_pre_edit_text handles both variants: for Full it indexes into the
-        // list, for Single (lonely) it returns the lone string.
-        let preEditIndex: UInt
-        if riti_suggestion_is_lonely(suggestion) {
-            preEditIndex = 0
+        let preEditText: String
+        if !riti_suggestion_is_lonely(suggestion), displayOrder.indices.contains(selectedIndex),
+           displayOrder[selectedIndex] == Self.historyRow {
+            preEditText = displayCandidates[selectedIndex]
         } else {
-            if displayOrder.isEmpty { return }
-            preEditIndex = selectedRitiIndex
+            // get_pre_edit_text handles both variants: for Full it indexes into the
+            // list, for Single (lonely) it returns the lone string.
+            let preEditIndex: UInt
+            if riti_suggestion_is_lonely(suggestion) {
+                preEditIndex = 0
+            } else {
+                if displayOrder.isEmpty { return }
+                preEditIndex = selectedRitiIndex
+            }
+            guard let preEditPtr = riti_suggestion_get_pre_edit_text(suggestion, preEditIndex) else { return }
+            preEditText = String(cString: preEditPtr)
+            riti_string_free(preEditPtr)
         }
-        guard let preEditPtr = riti_suggestion_get_pre_edit_text(suggestion, preEditIndex) else { return }
-        let preEditText = String(cString: preEditPtr)
-        riti_string_free(preEditPtr)
 
         // Set as marked (underlined) text
         let attrs: [NSAttributedString.Key: Any] = [
@@ -941,7 +973,8 @@ class LekhoInputController: IMKInputController {
             return false
         }
 
-        let keys = engine.typedKeys
+        var keys = engine.typedKeys
+        var fromHistory = false
         let text: String
         if riti_suggestion_is_lonely(suggestion) {
             // Phonetic-only: every keystroke fills riti's buffer, so the session
@@ -956,23 +989,31 @@ class LekhoInputController: IMKInputController {
         } else {
             let safeIndex = min(max(index, 0), displayCandidates.count - 1)
             text = displayCandidates[safeIndex]
-            if engine.typingMode == .phoneticFirst, let phonetic = phoneticCandidate {
-                PhoneticFirstPicks.shared.record(typed: auxiliaryText, chosen: text, phonetic: phonetic)
+            if displayOrder[safeIndex] == Self.historyRow {
+                // Typed only the start of this word: nothing here says how to spell
+                // it in general, and riti has no row to learn.
+                fromHistory = true
+                keys = predictor.keys(for: text) ?? []
+                engine.finishSession()
+            } else {
+                if engine.typingMode == .phoneticFirst, let phonetic = phoneticCandidate {
+                    PhoneticFirstPicks.shared.record(typed: auxiliaryText, chosen: text, phonetic: phonetic)
+                }
+                engine.commit(ritiIndex: displayOrder[safeIndex])
             }
-            engine.commit(ritiIndex: displayOrder[safeIndex])
         }
 
         client.insertText(text as NSString, replacementRange: Self.emptyRange)
-        noteCommitted(text, keys: keys)
+        noteCommitted(text, keys: keys, fromHistory: fromHistory)
         resetSessionState()
         return !text.isEmpty
     }
 
-    private func noteCommitted(_ text: String, keys: [LekhoEngine.TypedKey]) {
+    private func noteCommitted(_ text: String, keys: [LekhoEngine.TypedKey], fromHistory: Bool) {
         let context = predictor.currentContext
         if engine.predictsNextWord {
-            predictor.didCommit(text)
-            if text == PhoneticFirstPicks.core(text) { predictor.noteKeys(keys, for: text) }
+            predictor.didCommit(text, typed: fromHistory ? nil : String(keys.map { $0.char }))
+            if !fromHistory, text == PhoneticFirstPicks.core(text) { predictor.noteKeys(keys, for: text) }
         }
         reopenable = text.isEmpty || keys.isEmpty || Self.containsEmoji(text) ? nil
             : ReopenableWord(text: text, keys: keys, context: context, spaceAfter: false)

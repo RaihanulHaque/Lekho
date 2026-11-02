@@ -23,6 +23,9 @@ final class WordPredictor {
         var count: Int
         /// Value of `Store.clock` when last typed; breaks ties in favor of recent words.
         var lastUsed: Int
+        /// What the user last typed for this word, to match it from its first letters.
+        /// Absent in history saved by older versions.
+        var typed: String?
     }
 
     private struct Store: Codable {
@@ -35,6 +38,14 @@ final class WordPredictor {
     private struct Observation {
         let context: [String]
         let word: String
+        let typed: String?
+    }
+
+    /// A word that has followed the current context.
+    struct Completion {
+        let word: String
+        /// What is being typed is the start of what was typed for this word.
+        let matchesTyped: Bool
     }
 
     private var store = Store()
@@ -57,7 +68,8 @@ final class WordPredictor {
     // MARK: Typing events
 
     /// `text` was committed as a word, possibly with punctuation around it.
-    func didCommit(_ text: String) {
+    /// `typed` is what was typed for it, unless it came from a suggestion.
+    func didCommit(_ text: String, typed: String? = nil) {
         confirm()
         let word = PhoneticFirstPicks.core(text)
         guard Self.isLearnable(word) else {
@@ -65,7 +77,7 @@ final class WordPredictor {
             return
         }
         if !text.hasPrefix(word) { context = [] }
-        unconfirmed = Observation(context: context, word: word)
+        unconfirmed = Observation(context: context, word: word, typed: typed.map(PhoneticFirstPicks.core))
         context = Array((context + [word]).suffix(2))
         // Punctuation after the word ends the phrase.
         if !text.hasSuffix(word) { endContext() }
@@ -115,6 +127,21 @@ final class WordPredictor {
         return Array(result.prefix(Self.maxPredictions))
     }
 
+    /// Everything that has followed the current context, best first, for the word
+    /// now being typed. No IPC or disk: this runs on every keystroke.
+    func completions(forTyped typed: String) -> [Completion] {
+        guard let last = context.last else { return [] }
+        let keys = context.count == 2 ? [context.joined(separator: " "), last] : [last]
+        var result: [Completion] = []
+        for key in keys {
+            for word in ranked(key) where !result.contains(where: { $0.word == word }) {
+                let matches = store.next[key]?[word]?.typed?.hasPrefix(typed) ?? false
+                result.append(Completion(word: word, matchesTyped: matches))
+            }
+        }
+        return result
+    }
+
     private func ranked(_ key: String) -> [String] {
         guard let next = store.next[key] else { return [] }
         return next.sorted {
@@ -140,19 +167,21 @@ final class WordPredictor {
         guard let observation = unconfirmed else { return }
         unconfirmed = nil
         guard let last = observation.context.last else { return }
-        learn(observation.word, after: last)
+        learn(observation, after: last)
         if observation.context.count == 2 {
-            learn(observation.word, after: observation.context.joined(separator: " "))
+            learn(observation, after: observation.context.joined(separator: " "))
         }
         prune()
         scheduleSave()
     }
 
-    private func learn(_ word: String, after key: String) {
+    private func learn(_ observation: Observation, after key: String) {
         store.clock += 1
+        let word = observation.word
         var next = store.next[key] ?? [:]
         next[word, default: Entry(count: 0, lastUsed: 0)].count += 1
         next[word]?.lastUsed = store.clock
+        if let typed = observation.typed { next[word]?.typed = typed }
         if next.count > Self.maxNextWordsPerContext,
            let stalest = next.min(by: { ($0.value.count, $0.value.lastUsed) < ($1.value.count, $1.value.lastUsed) }) {
             next.removeValue(forKey: stalest.key)

@@ -95,6 +95,8 @@ Changes apply immediately — no restart needed.
 
 After you type a word, Lekho suggests the words you've typed after it before. The more often you've typed a sequence, the higher it ranks, and suggestions that match your last two words come first. Nothing is suggested until you've typed a sequence at least once.
 
+Your history also helps while you type the next word. If you usually write ভাত after আমি, typing `b` after আমি lists ভাত right below the first row, ready to pick with its number, the arrow keys, or a click. Space still commits the same word it always would, so a suggestion never replaces what you typed unless you pick it.
+
 | Key | What it does |
 | --- | --- |
 | **Tab** | Type the first suggestion |
