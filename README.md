@@ -102,7 +102,7 @@ After you type a word, Lekho suggests the words you've typed after it before. Th
 | **Esc** | Dismiss the suggestions |
 | Anything else | Dismiss the suggestions and type as usual |
 
-Only Bangla words are learned, never numbers, English, or emoji, and a phrase ends at punctuation or when you move the cursor. The history is a local file, `~/Library/Application Support/Lekho/next-word-history.json`, readable only by your user account. To turn prediction off or erase the history, use **Predict the next word** in Settings. Phonetic-only mode doesn't use it.
+Lekho learns Bangla words and any English words you pick from the list, never numbers or emoji, and a phrase ends at punctuation or when you move the cursor. The history is a local file, `~/Library/Application Support/Lekho/next-word-history.json`, readable only by your user account. To turn prediction off or erase the history, use **Predict the next word** in Settings. Phonetic-only mode doesn't use it.
 
 ## Fonts
 

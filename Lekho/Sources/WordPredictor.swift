@@ -4,9 +4,9 @@ import Foundation
 /// word from that history. Everything stays in one local file in the user dir.
 ///
 /// A word is only learned once the next thing typed confirms it: backspacing
-/// right after a word retracts it, so typos don't end up in the history. Only
-/// whole Bangla words are stored, never digits, English, or emoji, and any of
-/// those (or punctuation) ends the phrase being tracked.
+/// right after a word retracts it, so typos don't end up in the history. Bangla
+/// words are stored, and English ones, which only get committed when picked from
+/// the list. Digits, emoji, and punctuation are not, and end the phrase being tracked.
 ///
 /// Main thread only, like the controllers that call it.
 final class WordPredictor {
@@ -130,6 +130,7 @@ final class WordPredictor {
             switch scalar.value {
             case 0x09E6...0x09EF: return false              // Bengali digits
             case 0x0980...0x09FF, 0x200C, 0x200D: return true  // Bengali, ZWNJ, ZWJ
+            case 0x41...0x5A, 0x61...0x7A: return true      // English letters
             default: return false
             }
         }

@@ -451,6 +451,28 @@ c.type("amar "); c.key(BKSP); c.key(BKSP); c.type(" "); check("reopened, shorten
 c.key(BKSP); c.type("r"); check("…continues too", c.client.marked, "আমার")
 c.type(" "); check("…as one word", c.take(), "আমার "); newLine(c)
 
+print("== English word picked from the list stays in the phrase")
+WordPredictor.shared.clearHistory()
+func pickEnglish(_ rig: Rig, _ word: String) {
+    rig.type(word)
+    guard let row = rig.candidates.firstIndex(of: word) else { checkTrue("\(word) is listed", false, "\(rig.candidates)"); return }
+    rig.key(0, chars: String(row + 1))
+}
+c.type("ami "); pickEnglish(c, "vat"); c.type("diyechi ")
+let phrase = c.take(); newLine(c)
+let lastWord = String(phrase.split(separator: " ").last ?? "")
+check("typed as expected", phrase, "আমি vat \(lastWord) ")
+c.type("ami "); check("English word predicted after Bangla", c.controller.predictions.joined(separator: ","), "vat")
+_ = c.take()
+c.key(TAB, chars: "\t"); check("Tab types it", c.take(), "vat")
+check("Bangla word predicted after English", c.controller.predictions.joined(separator: ","), lastWord)
+c.key(TAB, chars: "\t"); check("…and chains", c.take(), " " + lastWord); newLine(c); c.key(ESC); _ = c.take()
+pickEnglish(c, "vat"); c.key(BKSP); c.key(BKSP); checkTrue("picked English word reopens", !c.client.marked.isEmpty, c.client.marked)
+c.type("t"); check("retyping gives the English word back", c.client.marked, "vat")
+c.key(ESC); _ = c.take(); newLine(c)
+c.type("ami "); _ = c.take(); c.key(0, chars: "5"); newLine(c); _ = c.take()
+c.type("covid-19 "); checkTrue("digits still break the phrase", c.controller.predictions.isEmpty, "\(c.controller.predictions)"); newLine(c); _ = c.take()
+
 UserDefaults.standard.removePersistentDomain(forName: ProcessInfo.processInfo.processName)
 print(failures == 0 ? "\nALL PASSED" : "\n\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)
